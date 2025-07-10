@@ -1,236 +1,81 @@
-# app.py
+"""Document Validation System - Main Application Module.
 
-import sys
-from flask import Flask, render_template, request, jsonify, send_file
+A Flask web application for processing and validating Aadhaar cards and grade cards
+using QR code technology with OCR capabilities.
+"""
+
+import os
+import json
+import logging
+import base64
+import gzip
+from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
+
 import cv2
 import numpy as np
-import gzip
-import json
 import qrcode
-import hashlib
-import hmac
 import easyocr
-import base64
-from io import BytesIO
-from PIL import Image
-import zlib
-from pyzbar.pyzbar import decode
-from functools import lru_cache
-from concurrent.futures import ThreadPoolExecutor
-import logging
-from logging.config import dictConfig
 import requests
+from flask import Flask, render_template, request, jsonify, send_file
+from pyzbar.pyzbar import decode
 
-dictConfig({
-    'version': 1,
-    'formatters': {'default': {
-        'format': '[%(asctime)s] %(levelname)s in %(module)s: %(message)s',
-    }},
-    'handlers': {'wsgi': {
-        'class': 'logging.StreamHandler',
-        'stream': 'ext://flask.logging.wsgi_errors_stream',
-        'formatter': 'default'
-    }},
-    'root': {
-        'level': 'INFO',
-        'handlers': ['wsgi']
-    }
-})
+from config import config
+from utils import (
+    ImageProcessor, DataProcessor, AadhaarProcessor, 
+    Validator, QRCodeEmbedder, BlockchainVerifier
+)
 
-app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+def create_app(config_name=None):
+    """Application factory pattern for creating Flask app."""
+    app = Flask(__name__)
+    
+    # Load configuration
+    config_name = config_name or os.environ.get('FLASK_ENV', 'development')
+    app.config.from_object(config[config_name])
+    
+    # Configure logging
+    configure_logging(app)
+    
+    return app
+
+def configure_logging(app):
+    """Configure application logging."""
+    if not app.debug and not app.testing:
+        logging.basicConfig(
+            level=logging.INFO,
+            format='[%(asctime)s] %(levelname)s in %(module)s: %(message)s'
+        )
+
+# Create application instance
+app = create_app()
 logger = logging.getLogger(__name__)
 
 # Initialize global resources
-executor = ThreadPoolExecutor(max_workers=4)
-reader = easyocr.Reader(['en'], gpu=False)
-SECRET_KEY = b'supersecretkey'  # Should be loaded from environment variable in production
+executor = ThreadPoolExecutor(max_workers=app.config['MAX_WORKERS'])
+reader = easyocr.Reader(app.config['OCR_LANGUAGES'], gpu=app.config['OCR_GPU'])
+blockchain_verifier = BlockchainVerifier(
+    app.config['BLOCKCHAIN_URL'], 
+    app.config['BLOCKCHAIN_TIMEOUT']
+)
 
-# Cache for optimization
+# Initialize processors
+image_processor = ImageProcessor()
+data_processor = DataProcessor()
+aadhaar_processor = AadhaarProcessor()
+validator = Validator()
+qr_embedder = QRCodeEmbedder()
+
 @lru_cache(maxsize=100)
 def get_qr_detector():
+    """Get cached QR code detector instance."""
     return cv2.QRCodeDetector()
 
-@lru_cache(maxsize=1000)
-def generate_hash_cached(data_str, dob_month):
-    """Cached version of hash generation for repeated values"""
-    iterations = int(dob_month) % 10 + 1
-    hash_value = data_str.encode()
-    for _ in range(iterations):
-        hash_value = hmac.new(SECRET_KEY, hash_value, hashlib.sha512).digest()
-    return base64.b85encode(hash_value).decode('utf-8')
-
-def optimize_image(image, max_size=(800, 800)):
-    """Optimize image size while maintaining readability"""
-    if image is None:
-        raise ValueError("Invalid image data")
-    height, width = image.shape[:2]
-    if height > max_size[0] or width > max_size[1]:
-        ratio = min(max_size[0]/height, max_size[1]/width)
-        new_size = (int(width * ratio), int(height * ratio))
-        image = cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
-    return image
-
-def compress_data(data_dict):
-    """Improved compression using zlib with optimal settings"""
-    json_str = json.dumps(data_dict, separators=(',', ':'))
-    compressed = zlib.compress(json_str.encode('utf-8'), level=9)
-    return base64.b85encode(compressed).decode('utf-8')
-
-def optimize_for_dense_qr(image):
-    """
-    Optimize image for dense QR code scanning with ZBar
-    """
-    # Convert to grayscale if needed
-    if len(image.shape) > 2:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
-    
-    # Apply adaptive thresholding to handle varying lighting conditions
-    thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 11, 2
-    )
-    
-    # Sharpen the image to enhance QR code boundaries
-    kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-    sharpened = cv2.filter2D(thresh, -1, kernel)
-    
-    # Try different sizes to handle dense QR codes
-    sizes = [(gray.shape[1], gray.shape[0])]  # Original size
-    # Add larger sizes for upscaling if needed
-    if gray.shape[1] < 1000 or gray.shape[0] < 1000:
-        sizes.append((int(gray.shape[1] * 1.5), int(gray.shape[0] * 1.5)))
-    sizes.append((int(gray.shape[1] * 2), int(gray.shape[0] * 2)))
-    
-    return {
-        'original': gray,
-        'binary': thresh,
-        'sharpened': sharpened,
-        'sizes': sizes
-    }
-
-@app.route('/api/webcam-qr', methods=['POST'])
-def webcam_qr():
-    try:
-        # Get image data from the request
-        image_data = request.json.get('image')
-        if not image_data:
-            return jsonify({'error': 'No image data provided'}), 400
-        
-        # Convert base64 to image
-        image_data = image_data.split(',')[1] if ',' in image_data else image_data
-        img_bytes = base64.b64decode(image_data)
-        img_array = np.frombuffer(img_bytes, np.uint8)
-        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        
-        if image is None:
-            return jsonify({'error': 'Failed to decode image'}), 400
-        
-        # Use ZBar to decode QR - Try multiple processing techniques
-        optimized = optimize_for_dense_qr(image)
-        
-        # Try different image processing methods to find QR code
-        qr_found = False
-        qr_data = None
-        
-        # First try original with various sizes
-        for size in optimized['sizes']:
-            if size != (image.shape[1], image.shape[0]):
-                resized = cv2.resize(optimized['original'], size)
-            else:
-                resized = optimized['original']
-            
-            decoded = decode(resized)
-            if decoded:
-                qr_found = True
-                qr_data = decoded[0].data.decode('utf-8')
-                logger.info(f"Found QR using original image at size {size}")
-                break
-        
-        # If not found, try binary
-        if not qr_found:
-            for size in optimized['sizes']:
-                if size != (optimized['binary'].shape[1], optimized['binary'].shape[0]):
-                    resized = cv2.resize(optimized['binary'], size)
-                else:
-                    resized = optimized['binary']
-                
-                decoded = decode(resized)
-                if decoded:
-                    qr_found = True
-                    qr_data = decoded[0].data.decode('utf-8')
-                    logger.info(f"Found QR using binary image at size {size}")
-                    break
-        
-        # If still not found, try sharpened
-        if not qr_found:
-            for size in optimized['sizes']:
-                if size != (optimized['sharpened'].shape[1], optimized['sharpened'].shape[0]):
-                    resized = cv2.resize(optimized['sharpened'], size)
-                else:
-                    resized = optimized['sharpened']
-                
-                decoded = decode(resized)
-                if decoded:
-                    qr_found = True
-                    qr_data = decoded[0].data.decode('utf-8')
-                    logger.info(f"Found QR using sharpened image at size {size}")
-                    break
-        
-        # Process QR results
-        if qr_found and qr_data:
-            # Log the detected QR data for debugging
-            logger.info(f"ZBar decoded QR data: {qr_data[:50]}..." if len(qr_data) > 50 else f"ZBar decoded QR data: {qr_data}")
-            
-            try:
-                # Try to process as Aadhaar QR
-                formatted_data, raw_data = process_aadhaar_qr(qr_data)
-                return jsonify({
-                    "type": "aadhaar",
-                    "formatted": formatted_data,
-                    "raw": raw_data
-                })
-            except Exception as e:
-                logger.info(f"Not an Aadhaar QR, treating as generic. Error: {str(e)}")
-                # Return as generic QR data
-                return jsonify({
-                    "type": "generic",
-                    "data": qr_data
-                })
-        else:
-            return jsonify({'message': 'No QR code found'}), 200
-        
-    except Exception as e:
-        logger.error(f"Error in webcam_qr: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-def process_aadhaar_qr(qr_data):
-    """Process Aadhaar QR data with optimized parsing"""
-    try:
-        byte_array = gzip.decompress(int(qr_data).to_bytes((int(qr_data).bit_length() + 7) // 8, 'big'))
-        fields = [f.decode('ISO-8859-1') for f in byte_array.split(b'\xff') if f]
-        
-        formatted_data = {
-            'fullname': fields[3],
-            'dob': fields[4],
-            'gender': fields[5],
-            'address': ' , '.join(fields[i] for i in [8,9,13,7,15,14,6,12,10])
-        }
-        
-        raw_data = '\xff'.join([fields[3], fields[4], fields[5]] + 
-                               [fields[i] for i in [8,9,13,7,15,14,6,12,10]])
-        
-        return formatted_data, raw_data
-    except Exception as e:
-        logger.error(f"Error processing Aadhaar QR: {str(e)}")
-        raise ValueError(f"Invalid Aadhaar QR data: {str(e)}")
-
 def perform_ocr(image):
-    """Perform OCR with optimized processing"""
+    """Perform OCR with optimized processing."""
     try:
-        image = optimize_image(image)
+        image = image_processor.optimize_image(image)
         results = reader.readtext(image)
         
         return [{
@@ -247,37 +92,87 @@ def perform_ocr(image):
         logger.error(f"OCR processing error: {str(e)}")
         raise
 
-def validate_dob(dob):
-    """Validate DOB format and extract month"""
-    if not isinstance(dob, str):
-        raise ValueError("DOB must be a string")
-    
-    separators = {'/', '-'}
-    separator = next((s for s in separators if s in dob), None)
-    
-    if not separator:
-        raise ValueError("DOB must contain either / or - separators")
-    
-    parts = dob.split(separator)
-    if len(parts) != 3:
-        raise ValueError("DOB must be in DD/MM/YYYY or DD-MM-YYYY format")
-    
-    month = int(parts[1])
-    if not 1 <= month <= 12:
-        raise ValueError(f"Invalid month value: {month}. Month must be between 1 and 12")
-    
-    return month
-
 @app.route('/')
 def index():
+    """Render main application page."""
     return render_template('index.html')
 
 @app.route('/verify')
 def verify():
+    """Render verification page."""
     return render_template('verify.html')
 
+@app.route('/api/webcam-qr', methods=['POST'])
+def webcam_qr():
+    """Process QR code from webcam feed."""
+    try:
+        # Get image data from request
+        image_data = request.json.get('image')
+        if not image_data:
+            return jsonify({'error': 'No image data provided'}), 400
+        
+        # Convert base64 to image
+        image_data = image_data.split(',')[1] if ',' in image_data else image_data
+        img_bytes = base64.b64decode(image_data)
+        img_array = np.frombuffer(img_bytes, np.uint8)
+        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            return jsonify({'error': 'Failed to decode image'}), 400
+        
+        # Optimize image for QR scanning
+        optimized = image_processor.optimize_for_qr_scanning(image)
+        
+        # Try different processing methods to find QR code
+        qr_found = False
+        qr_data = None
+        
+        # Try different image variations and sizes
+        for img_type in ['original', 'binary', 'sharpened']:
+            if qr_found:
+                break
+            
+            for size in optimized['sizes']:
+                current_img = optimized[img_type]
+                if size != (current_img.shape[1], current_img.shape[0]):
+                    resized = cv2.resize(current_img, size)
+                else:
+                    resized = current_img
+                
+                decoded = decode(resized)
+                if decoded:
+                    qr_found = True
+                    qr_data = decoded[0].data.decode('utf-8')
+                    logger.info(f"Found QR using {img_type} image at size {size}")
+                    break
+        
+        # Process QR results
+        if qr_found and qr_data:
+            logger.info(f"ZBar decoded QR data: {qr_data[:50]}...")
+            
+            try:
+                # Try to process as Aadhaar QR
+                formatted_data, raw_data = aadhaar_processor.process_qr_data(qr_data)
+                return jsonify({
+                    "type": "aadhaar",
+                    "formatted": formatted_data,
+                    "raw": raw_data
+                })
+            except Exception as e:
+                logger.info(f"Not an Aadhaar QR, treating as generic. Error: {str(e)}")
+                return jsonify({
+                    "type": "generic",
+                    "data": qr_data
+                })
+        else:
+            return jsonify({'message': 'No QR code found'}), 200
+        
+    except Exception as e:
+        logger.error(f"Error in webcam_qr: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 @app.route('/api/process-aadhaar', methods=['POST'])
 def process_aadhaar():
+    """Process Aadhaar QR code from uploaded image."""
     try:
         if 'qr_image' not in request.files:
             return jsonify({'error': 'No QR image provided'}), 400
@@ -296,7 +191,7 @@ def process_aadhaar():
             return jsonify({'error': 'No QR code detected'}), 400
         
         data = qr_codes[0].data.decode('utf-8')
-        formatted_data, raw_data = process_aadhaar_qr(data)
+        formatted_data, raw_data = aadhaar_processor.process_qr_data(data)
         
         return jsonify({"formatted": formatted_data, "raw": raw_data})
     
@@ -306,6 +201,7 @@ def process_aadhaar():
 
 @app.route('/api/process-gradecard', methods=['POST'])
 def process_gradecard():
+    """Process grade card image using OCR."""
     try:
         if 'gradecard_image' not in request.files:
             return jsonify({'error': 'No grade card image provided'}), 400
@@ -318,7 +214,7 @@ def process_gradecard():
         future = executor.submit(perform_ocr, img)
         ocr_results = future.result()
         
-        # Remove confidence
+        # Remove confidence scores from results
         for result in ocr_results:
             result.pop('confidence', None)
         
@@ -330,6 +226,7 @@ def process_gradecard():
 
 @app.route('/api/generate-qr', methods=['POST'])
 def generate_qr():
+    """Generate verification QR code from document data."""
     try:
         if not request.is_json:
             return jsonify({'error': 'No JSON data received'}), 400
@@ -338,9 +235,9 @@ def generate_qr():
         if not all(k in data for k in ('aadhaar', 'gradecard')):
             return jsonify({'error': 'Missing required data'}), 400
             
-        dob_month = validate_dob(data['aadhaar']['dob'])
+        dob_month = validator.validate_dob(data['aadhaar']['dob'])
         
-        # Prepare data for QR
+        # Prepare data for QR code
         combined_data = [
             *[str(v) for v in data['aadhaar'].values()],
             *[
@@ -358,19 +255,20 @@ def generate_qr():
         ]
         
         # Generate hash and compress data
-        hash_value = generate_hash_cached(json.dumps(combined_data, sort_keys=True), dob_month)
+        hash_value = data_processor.generate_hash(
+            json.dumps(combined_data, sort_keys=True), 
+            dob_month, 
+            app.config['SECRET_KEY']
+        )
         final_data = b'\xff'.join([str(i).encode('ISO-8859-1') for i in [*combined_data, hash_value]])
         compressed_data = int.from_bytes(gzip.compress(final_data), 'big')
-        
-        # Store compressed_data as a string for the frontend
-        compressed_data_str = str(compressed_data)
         
         # Generate QR code
         qr = qrcode.QRCode(
             version=None,
-            error_correction=qrcode.constants.ERROR_CORRECT_L,
-            box_size=10,
-            border=4,
+            error_correction=getattr(qrcode.constants, f"ERROR_CORRECT_{app.config['QR_ERROR_CORRECTION']}"),
+            box_size=app.config['QR_BOX_SIZE'],
+            border=app.config['QR_BORDER'],
         )
         
         qr.add_data(compressed_data)
@@ -380,7 +278,7 @@ def generate_qr():
         qr.make_image(fill_color="black", back_color="white").save(img_buffer, format='PNG')
         img_buffer.seek(0)
         
-        # Return both the QR image and data in response headers
+        # Return QR image
         response = send_file(
             img_buffer,
             mimetype='image/png',
@@ -391,7 +289,7 @@ def generate_qr():
         response.headers.update({
             'Cache-Control': 'no-cache, no-store, must-revalidate',
             'Pragma': 'no-cache',
-            'X-QR-Data': compressed_data_str  # Add QR data in header
+            'X-QR-Data': str(compressed_data)
         })
         
         return response
@@ -399,10 +297,9 @@ def generate_qr():
     except Exception as e:
         logger.error(f"Error in generate_qr: {str(e)}")
         return jsonify({'error': str(e)}), 500
-
-
 @app.route('/api/verify-qr', methods=['POST'])
 def verify_qr():
+    """Verify document authenticity from QR code."""
     try:
         if 'qr_image' not in request.files:
             return jsonify({'error': 'No QR image provided'}), 400
@@ -422,8 +319,8 @@ def verify_qr():
         decoded_data = gzip.decompress(byte_data).decode('ISO-8859-1').split('\xff')
         
         # Extract components
-        aadhaar_data = decoded_data[:4]  # Assuming 4 aadhaar fields
-        gradecard_data = decoded_data[4:-3]  # Everything between aadhaar and final fields
+        aadhaar_data = decoded_data[:4]
+        gradecard_data = decoded_data[4:-3]
         remarks = decoded_data[-3]
         enrollment = decoded_data[-2]
         stored_hash = decoded_data[-1]
@@ -436,32 +333,23 @@ def verify_qr():
             'enrollment': enrollment
         }
 
-        # Match hash with hash on block (currently on localhost:6060)
-        try:
-            blockchain_url = f"http://localhost:6060/api/admin/student/{stored_hash}/transcript"
-            response = requests.get(blockchain_url, timeout=5)
-            
-            if response.status_code == 200:
-                blockchain_data = response.json()
-                blockchain_details = blockchain_data.get('details')
-                logger.info(f"Blockchain verification successful: {blockchain_details}")
-                
-                # Add blockchain verification results to the response
-                combined_data['blockchain_verified'] = True
-                combined_data['blockchain_details'] = blockchain_details
-            else:
-                logger.warning(f"Blockchain verification failed with status code: {response.status_code}")
-                combined_data['blockchain_verified'] = False
-        except Exception as blockchain_error:
-            logger.error(f"Blockchain verification error: {str(blockchain_error)}")
-            combined_data['blockchain_verified'] = False
-            combined_data['blockchain_error'] = str(blockchain_error)
+        # Blockchain verification
+        blockchain_result = blockchain_verifier.verify_hash(stored_hash)
+        combined_data['blockchain_verified'] = blockchain_result['verified']
+        
+        if blockchain_result['verified']:
+            combined_data['blockchain_details'] = blockchain_result.get('details')
+            logger.info("Blockchain verification successful")
+        else:
+            combined_data['blockchain_error'] = blockchain_result.get('error')
+            logger.warning(f"Blockchain verification failed: {blockchain_result.get('error')}")
          
         # Validate hash
-        dob_month = validate_dob(combined_data['aadhaar']['dob'])
-        computed_hash = generate_hash_cached(
+        dob_month = validator.validate_dob(combined_data['aadhaar']['dob'])
+        computed_hash = data_processor.generate_hash(
             json.dumps([*aadhaar_data, *gradecard_data, remarks, enrollment], sort_keys=True),
-            dob_month
+            dob_month,
+            app.config['SECRET_KEY']
         )
         
         combined_data['gradecard'] = [eval(i) for i in gradecard_data]
@@ -477,6 +365,7 @@ def verify_qr():
 
 @app.route('/api/embed-qr', methods=['POST'])
 def embed_qr():
+    """Embed QR code into grade card image."""
     try:
         if 'gradecard_image' not in request.files or 'qr_image' not in request.files:
             return jsonify({'error': 'Both grade card and QR images are required'}), 400
@@ -486,52 +375,17 @@ def embed_qr():
         gradecard_array = np.frombuffer(gradecard_file.read(), np.uint8)
         gradecard_img = cv2.imdecode(gradecard_array, cv2.IMREAD_COLOR)
         
-        # Get the QR code image directly
+        # Get the QR code image
         qr_file = request.files['qr_image']
         qr_array = np.frombuffer(qr_file.read(), np.uint8)
         qr_img = cv2.imdecode(qr_array, cv2.IMREAD_COLOR)
         
-        # Convert to binary image
+        # Convert to binary image for white space detection
         gray = cv2.cvtColor(gradecard_img, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 250, 255, cv2.THRESH_BINARY)
         
-        # Function to find white rectangle
-        def find_rectangle(img, start_y, start_x):
-            height, width = img.shape
-            end_x = start_x
-            end_y = start_y
-            
-            # Extend vertically
-            while end_y < height and img[end_y, start_x] == 255:
-                end_y += 1
-            
-            # Extend horizontally
-            can_extend = True
-            while end_x < width and can_extend:
-                for y in range(start_y, end_y):
-                    if img[y, end_x] != 255:
-                        can_extend = False
-                        break
-                if can_extend:
-                    end_x += 1
-            
-            return (start_x, start_y, end_x-1, end_y-1)
-        
         # Find largest white rectangle
-        height, width = binary.shape
-        processed = np.zeros_like(binary)
-        max_area = 0
-        max_coords = None
-        
-        for y in range(height):
-            for x in range(width):
-                if binary[y,x] == 255 and processed[y,x] == 0:
-                    x1, y1, x2, y2 = find_rectangle(binary, y, x)
-                    area = (x2-x1+1) * (y2-y1+1)
-                    if area > max_area:
-                        max_area = area
-                        max_coords = (x1, y1, x2, y2)
-                    processed[y1:y2+1, x1:x2+1] = 255
+        max_coords = qr_embedder.find_largest_white_space(binary)
         
         if not max_coords:
             return jsonify({'error': 'No suitable white space found'}), 400
@@ -540,15 +394,13 @@ def embed_qr():
         rect_width = x2 - x1
         rect_height = y2 - y1
 
-        qr_array = qr_img  # qr_img is already a numpy array from cv2.imdecode
-        
-        # Resize QR to fit in rectangle (with padding)
+        # Resize QR to fit in rectangle with padding
         padding = 20
         qr_size = min(rect_width - padding, rect_height - padding)
-        if qr_size < 100:  # Minimum size check
+        if qr_size < 100:
             return jsonify({'error': 'White space too small for QR code'}), 400
         
-        qr_array = cv2.resize(qr_array, (qr_size, qr_size))
+        qr_img = cv2.resize(qr_img, (qr_size, qr_size))
         
         # Calculate centering position
         start_x = x1 + (rect_width - qr_size) // 2
@@ -564,7 +416,7 @@ def embed_qr():
         )
         
         # Embed QR code
-        gradecard_img[start_y:start_y+qr_size, start_x:start_x+qr_size] = qr_array
+        gradecard_img[start_y:start_y+qr_size, start_x:start_x+qr_size] = qr_img
         
         # Add border around QR code
         cv2.rectangle(
@@ -589,6 +441,19 @@ def embed_qr():
     except Exception as e:
         logger.error(f"Error in embed_qr: {str(e)}")
         return jsonify({'error': str(e)}), 500
-    
+
+@app.errorhandler(404)
+def not_found_error(error):
+    """Handle 404 errors."""
+    return jsonify({'error': 'Resource not found'}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    """Handle 500 errors."""
+    logger.error(f"Internal server error: {str(error)}")
+    return jsonify({'error': 'Internal server error'}), 500
+
 if __name__ == '__main__':
-    app.run(debug=True)  # Set debug=False in production
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_ENV') == 'development'
+    app.run(host='0.0.0.0', port=port, debug=debug)
