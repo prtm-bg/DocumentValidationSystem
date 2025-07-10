@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Verification System</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+
+        .section {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            background-color: #f9f9f9;
+        }
+
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        button.active {
+            background-color: #2196F3;
+        }
+
+        input,
+        textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 8px 0;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        #qrResult,
+        #aadhaarStatus,
+        #gradecardStatus,
+        #embedResult {
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        .success {
+            color: green;
+            font-weight: bold;
+        }
+
+        .error {
+            color: red;
+            font-weight: bold;
+        }
+
+        video {
+            width: 100%;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
+        .button {
+            display: inline-block;
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 10px 0;
+            text-decoration: none;
+            text-align: center;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Document Verification System</h1>
+
+    <div class="section">
+        <h2>Step 1: Scan Aadhaar QR</h2>
+
+        <!-- Upload QR image option -->
+        <div>
+            <input type="file" id="qrImageInput" accept="image/*">
+            <button id="processAadhaarButton">Process Aadhaar QR</button>
+        </div>
+
+        <!-- Webcam option -->
+        <div>
+            <h3>Scan Aadhaar QR with Webcam</h3>
+            <div>
+                <button id="startCameraButton">Start Camera</button>
+                <button id="stopCameraButton" disabled>Stop Camera</button>
+            </div>
+            <div id="videoContainer" style="display: none;">
+                <video id="webcamVideo" autoplay playsinline></video>
+                <button id="captureButton">Capture QR Code</button>
+            </div>
+        </div>
+
+        <div id="aadhaarStatus"></div>
+    </div>
+
+    <div class="section">
+        <h2>Step 2: Upload Grade Card</h2>
+
+        <div>
+            <input type="file" id="gradecardImageInput" accept="image/*">
+            <button id="processGradecardButton">Process Grade Card</button>
+        </div>
+
+        <div id="gradecardStatus"></div>
+    </div>
+
+    <div class="section">
+        <h2>Additional Information</h2>
+
+        <div>
+            <label for="remarks">Remarks:</label>
+            <textarea id="remarks" rows="3"></textarea>
+        </div>
+
+        <div>
+            <label for="enrollment">Enrollment Number:</label>
+            <input type="text" id="enrollment">
+        </div>
+    </div>
+
+    <button id="generateQRButton" disabled>Process QR and gradecard first then generate</button>
+
+    <div id="qrResult"></div>
+
+    <div class="section">
+        <h2>Step 3: Embed QR Code in Grade Card</h2>
+        <p>Embed the generated QR code into the previously uploaded grade card.</p>
+        <button id="embedQRButton" disabled>Embed QR in Grade Card</button>
+        <div id="embedResult"></div>
+    </div>
+
+    <script>
+        // Variables to store processed data
+        let aadhaarData = null;
+        let gradecardData = null;
+        let videoStream = null;
+        let generatedQRData = null;
+        let qrImageBlob = null;
+
+        // DOM elements
+        const qrImageInput = document.getElementById('qrImageInput');
+        const processAadhaarButton = document.getElementById('processAadhaarButton');
+        const startCameraButton = document.getElementById('startCameraButton');
+        const stopCameraButton = document.getElementById('stopCameraButton');
+        const webcamVideo = document.getElementById('webcamVideo');
+        const videoContainer = document.getElementById('videoContainer');
+        const captureButton = document.getElementById('captureButton');
+        const gradecardImageInput = document.getElementById('gradecardImageInput');
+        const processGradecardButton = document.getElementById('processGradecardButton');
+        const generateQRButton = document.getElementById('generateQRButton');
+        const embedQRButton = document.getElementById('embedQRButton');
+        const remarks = document.getElementById('remarks');
+        const enrollment = document.getElementById('enrollment');
+        const aadhaarStatus = document.getElementById('aadhaarStatus');
+        const gradecardStatus = document.getElementById('gradecardStatus');
+        const qrResult = document.getElementById('qrResult');
+        const embedResult = document.getElementById('embedResult');
+
+        // Function to update button state
+        function updateGenerateButtonState() {
+            if (aadhaarData && gradecardData) {
+                generateQRButton.disabled = false;
+                generateQRButton.textContent = 'Generate Verification QR';
+                generateQRButton.classList.add('active');
+            } else {
+                generateQRButton.disabled = true;
+                generateQRButton.textContent = 'Process QR and gradecard first then generate';
+                generateQRButton.classList.remove('active');
+            }
+        }
+
+        // Function to update embed button state
+        function updateEmbedButtonState() {
+            if (qrResult.querySelector('img') && gradecardImageInput.files[0]) {
+                embedQRButton.disabled = false;
+                embedQRButton.classList.add('active');
+            } else {
+                embedQRButton.disabled = true;
+                embedQRButton.classList.remove('active');
+            }
+        }
+
+        // Process Aadhaar QR image
+        processAadhaarButton.addEventListener('click', function () {
+            if (!qrImageInput.files[0]) {
+                aadhaarStatus.innerHTML = '<div class="error">Please select a QR image file</div>';
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('qr_image', qrImageInput.files[0]);
+
+            aadhaarStatus.innerHTML = '<div>Processing Aadhaar QR...</div>';
+
+            fetch('/api/process-aadhaar', {
+                method: 'POST',
+                body: formData
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Server returned ' + response.status);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    // Handle success
+                    if (data.formatted) {
+                        aadhaarData = data.formatted;
+                        aadhaarStatus.innerHTML = '<div class="success">Aadhaar processed successfully</div>';
+                        aadhaarStatus.innerHTML += `<p>Name: ${data.formatted.fullname}</p>`;
+                        aadhaarStatus.innerHTML += `<p>DOB: ${data.formatted.dob}</p>`;
+                        updateGenerateButtonState();
+                    } else if (data.error) {
+                        aadhaarStatus.innerHTML = `<div class="error">${data.error}</div>`;
+                    }
+                })
+                .catch(error => {
+                    aadhaarStatus.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+                });
+        });
+
+        // Process Grade Card image
+        processGradecardButton.addEventListener('click', function () {
+            if (!gradecardImageInput.files[0]) {
+                gradecardStatus.innerHTML = '<div class="error">Please select a grade card image file</div>';
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('gradecard_image', gradecardImageInput.files[0]);
+
+            gradecardStatus.innerHTML = '<div>Processing Grade Card...</div>';
+
+            fetch('/api/process-gradecard', {
+                method: 'POST',
+                body: formData
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Server returned ' + response.status);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (Array.isArray(data)) {
+                        gradecardData = data;
+                        gradecardStatus.innerHTML = '<div class="success">Grade card processed successfully</div>';
+                        gradecardStatus.innerHTML += `<p>Detected ${data.length} text elements</p>`;
+                        updateGenerateButtonState();
+                    } else if (data.error) {
+                        gradecardStatus.innerHTML = `<div class="error">${data.error}</div>`;
+                    }
+                })
+                .catch(error => {
+                    gradecardStatus.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+                });
+        });
+
+        // Generate QR code
+        generateQRButton.addEventListener('click', function () {
+            if (!aadhaarData || !gradecardData) {
+                alert('Please process both Aadhaar QR and grade card first');
+                return;
+            }
+
+            qrResult.innerHTML = '<div>Generating QR code...</div>';
+
+            const data = {
+                aadhaar: aadhaarData,
+                gradecard: gradecardData,
+                remarks: remarks.value,
+                enrollment: enrollment.value
+            };
+
+            generatedQRData = data;
+
+            fetch('/api/generate-qr', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        return response.json().then(err => { throw new Error(err.error); });
+                    }
+                    return response.blob();
+                })
+                .then(blob => {
+                    qrImageBlob = blob;  // Store it in the global variable
+                    const url = URL.createObjectURL(blob);
+                    const img = document.createElement('img');
+                    img.src = url;
+                    qrResult.innerHTML = '<div class="success">QR Code generated successfully:</div>';
+                    qrResult.appendChild(img);
+                    const downloadLink = document.createElement('a');
+                    downloadLink.href = url;
+                    downloadLink.download = 'verification-qr.png';
+                    downloadLink.textContent = 'Download QR Code';
+                    downloadLink.className = 'button';
+                    downloadLink.style.display = 'block';
+                    downloadLink.style.margin = '10px auto';
+                    qrResult.appendChild(downloadLink);
+
+                    // Enable embed button now that QR is generated
+                    updateEmbedButtonState();
+                })
+                .catch(error => {
+                    qrResult.innerHTML = `<div class="error">Error generating QR: ${error.message}</div>`;
+                });
+        });
+
+        // Embed QR in grade card
+        embedQRButton.addEventListener('click', function () {
+            if (!qrResult.querySelector('img')) {
+                embedResult.innerHTML = '<div class="error">Please generate a QR code first</div>';
+                return;
+            }
+
+            if (!gradecardImageInput.files[0]) {
+                embedResult.innerHTML = '<div class="error">No grade card image available</div>';
+                return;
+            }
+
+            if (!generatedQRData) {
+                embedResult.innerHTML = '<div class="error">QR data not available. Please regenerate the QR code.</div>';
+                return;
+            }
+
+            embedResult.innerHTML = '<div>Embedding QR code in grade card...</div>';
+
+            const formData = new FormData();
+            formData.append('gradecard_image', gradecardImageInput.files[0]);
+            formData.append('qr_image', qrImageBlob, 'qr-code.png');
+
+            fetch('/api/embed-qr', {
+                method: 'POST',
+                body: formData
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        return response.json().then(err => { throw new Error(err.error || 'Server error'); });
+                    }
+                    return response.blob();
+                })
+                .then(blob => {
+                    const url = URL.createObjectURL(blob);
+                    const img = document.createElement('img');
+                    img.src = url;
+                    img.style.maxWidth = '100%';
+
+                    embedResult.innerHTML = '<div class="success">QR Code embedded successfully:</div>';
+                    embedResult.appendChild(img);
+
+                    const downloadLink = document.createElement('a');
+                    downloadLink.href = url;
+                    downloadLink.download = 'gradecard_with_qr.jpg';
+                    downloadLink.textContent = 'Download Grade Card with QR';
+                    downloadLink.className = 'button';
+                    downloadLink.style.display = 'block';
+                    downloadLink.style.margin = '10px auto';
+
+                    embedResult.appendChild(downloadLink);
+                })
+                .catch(error => {
+                    embedResult.innerHTML = `<div class="error">Error embedding QR: ${error.message}</div>`;
+                });
+        });
+
+        // WebCam QR scanning
+        startCameraButton.addEventListener('click', function () {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+                    .then(function (stream) {
+                        videoStream = stream;
+                        webcamVideo.srcObject = stream;
+                        videoContainer.style.display = 'block';
+                        startCameraButton.disabled = true;
+                        stopCameraButton.disabled = false;
+                    })
+                    .catch(function (error) {
+                        alert('Error accessing camera: ' + error.message);
+                    });
+            } else {
+                alert('Your browser does not support camera access');
+            }
+        });
+
+        stopCameraButton.addEventListener('click', function () {
+            if (videoStream) {
+                videoStream.getTracks().forEach(track => track.stop());
+                videoStream = null;
+                webcamVideo.srcObject = null;
+                videoContainer.style.display = 'none';
+                startCameraButton.disabled = false;
+                stopCameraButton.disabled = true;
+            }
+        });
+
+        captureButton.addEventListener('click', function () {
+            if (!videoStream) {
+                alert('Camera is not active');
+                return;
+            }
+
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.width = webcamVideo.videoWidth;
+            canvas.height = webcamVideo.videoHeight;
+            context.drawImage(webcamVideo, 0, 0, canvas.width, canvas.height);
+
+            const imageData = canvas.toDataURL('image/jpeg');
+
+            aadhaarStatus.innerHTML = '<div>Processing Aadhaar QR from camera...</div>';
+
+            fetch('/api/webcam-qr', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ image: imageData })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.type === 'aadhaar' && data.formatted) {
+                        aadhaarData = data.formatted;
+                        aadhaarStatus.innerHTML = '<div class="success">Aadhaar QR scanned successfully</div>';
+                        aadhaarStatus.innerHTML += `<p>Name: ${data.formatted.fullname}</p>`;
+                        aadhaarStatus.innerHTML += `<p>DOB: ${data.formatted.dob}</p>`;
+                        updateGenerateButtonState();
+                    } else if (data.type === 'generic' && data.data) {
+                        aadhaarStatus.innerHTML = '<div class="error">QR found but not an Aadhaar QR code</div>';
+                    } else if (data.message) {
+                        aadhaarStatus.innerHTML = `<div class="error">${data.message}</div>`;
+                    } else if (data.error) {
+                        aadhaarStatus.innerHTML = `<div class="error">${data.error}</div>`;
+                    }
+                })
+                .catch(error => {
+                    aadhaarStatus.innerHTML = `<div class="error">Error scanning QR: ${error.message}</div>`;
+                });
+        });
+
+        // Make embed button check when QR is generated
+        // This is a kind of observer to update the embed button state when the QR is generated
+        const observer = new MutationObserver(function (mutations) {
+            updateEmbedButtonState();
+        });
+        observer.observe(qrResult, { childList: true, subtree: true });
+    </script>
+</body>
+
+</html>

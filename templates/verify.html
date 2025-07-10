@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Verification System - Verify</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        
+        .section {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            background-color: #f9f9f9;
+        }
+        
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        
+        button.active {
+            background-color: #2196F3;
+        }
+        
+        input {
+            width: 100%;
+            padding: 8px;
+            margin: 8px 0;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        
+        #verificationResult, #scanStatus {
+            margin-top: 20px;
+            text-align: center;
+        }
+        
+        .success {
+            color: green;
+            font-weight: bold;
+        }
+        
+        .error {
+            color: red;
+            font-weight: bold;
+        }
+        
+        video {
+            width: 100%;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        .verification-data {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            margin-top: 10px;
+            background-color: #fff;
+        }
+        
+        .verification-data h3 {
+            margin-top: 0;
+            border-bottom: 1px solid #eee;
+            padding-bottom: 10px;
+        }
+        
+        .verification-data table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .verification-data table td, .verification-data table th {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .document-view {
+            position: relative;
+            width: 100%;
+            height: 600px;
+            border: 1px solid #ccc;
+            background-color: #fff;
+            margin-top: 15px;
+            overflow: hidden;
+        }
+        
+        .document-element {
+            position: absolute;
+            font-family: Arial;
+            overflow: hidden;
+            line-height: 1.2;
+            word-break: break-word;
+            background-color: rgba(255, 255, 255, 0.8);
+        }
+    </style>
+</head>
+<body>
+    <h1>Document Verification System</h1>
+    
+    <div class="section">
+        <h2>Verify Document</h2>
+        
+        <!-- Upload QR image option -->
+        <div>
+            <h3>Upload QR Code Image</h3>
+            <input type="file" id="qrImageInput" accept="image/*">
+            <button id="verifyQrButton">Verify QR Code</button>
+        </div>
+        
+        <!-- Webcam option -->
+        <div>
+            <h3>Scan QR Code with Webcam</h3>
+            <div>
+                <button id="startCameraButton">Start Camera</button>
+                <button id="stopCameraButton" disabled>Stop Camera</button>
+            </div>
+            <div id="videoContainer" style="display: none;">
+                <video id="webcamVideo" autoplay playsinline></video>
+                <button id="captureButton">Capture QR Code</button>
+            </div>
+        </div>
+        
+        <div id="scanStatus"></div>
+    </div>
+    
+    <div id="verificationResult"></div>
+    
+    <script>
+        // Variables
+        let videoStream = null;
+        
+        // DOM elements
+        const qrImageInput = document.getElementById('qrImageInput');
+        const verifyQrButton = document.getElementById('verifyQrButton');
+        const startCameraButton = document.getElementById('startCameraButton');
+        const stopCameraButton = document.getElementById('stopCameraButton');
+        const webcamVideo = document.getElementById('webcamVideo');
+        const videoContainer = document.getElementById('videoContainer');
+        const captureButton = document.getElementById('captureButton');
+        const scanStatus = document.getElementById('scanStatus');
+        const verificationResult = document.getElementById('verificationResult');
+        
+        // Verify QR from uploaded image
+        verifyQrButton.addEventListener('click', function() {
+            if (!qrImageInput.files[0]) {
+                scanStatus.innerHTML = '<div class="error">Please select a QR image file</div>';
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('qr_image', qrImageInput.files[0]);
+            scanStatus.innerHTML = '<div>Processing QR code...</div>';
+            
+            verifyQR(formData);
+        });
+        
+        // Start camera for scanning
+        startCameraButton.addEventListener('click', function() {
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+                    .then(function(stream) {
+                        videoStream = stream;
+                        webcamVideo.srcObject = stream;
+                        videoContainer.style.display = 'block';
+                        startCameraButton.disabled = true;
+                        stopCameraButton.disabled = false;
+                    })
+                    .catch(function(error) {
+                        alert('Error accessing camera: ' + error.message);
+                    });
+            } else {
+                alert('Your browser does not support camera access');
+            }
+        });
+        
+        // Stop camera
+        stopCameraButton.addEventListener('click', function() {
+            if (videoStream) {
+                videoStream.getTracks().forEach(track => track.stop());
+                videoStream = null;
+                webcamVideo.srcObject = null;
+                videoContainer.style.display = 'none';
+                startCameraButton.disabled = false;
+                stopCameraButton.disabled = true;
+            }
+        });
+        
+        // Capture frame from webcam
+        captureButton.addEventListener('click', function() {
+            if (!videoStream) {
+                alert('Camera is not active');
+                return;
+            }
+            
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.width = webcamVideo.videoWidth;
+            canvas.height = webcamVideo.videoHeight;
+            context.drawImage(webcamVideo, 0, 0, canvas.width, canvas.height);
+            
+            const imageData = canvas.toDataURL('image/jpeg');
+            
+            scanStatus.innerHTML = '<div>Processing QR from camera...</div>';
+            
+            // Convert base64 to Blob
+            fetch(imageData)
+                .then(res => res.blob())
+                .then(blob => {
+                    const formData = new FormData();
+                    formData.append('qr_image', blob, 'webcam-capture.jpg');
+                    
+                    verifyQR(formData);
+                })
+                .catch(error => {
+                    scanStatus.innerHTML = `<div class="error">Error processing image: ${error.message}</div>`;
+                });
+        });
+        
+        // Function to verify QR code
+        function verifyQR(formData) {
+            fetch('/api/verify-qr', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => {
+                if (!response.ok) {
+                    return response.json().then(err => { throw new Error(err.error || 'Server error'); });
+                }
+                return response.json();
+            })
+            .then(data => {
+                scanStatus.innerHTML = data.is_valid 
+                    ? '<div class="success">QR Code verified successfully!</div>' 
+                    : '<div class="error">Invalid QR Code or verification failed</div>';
+                
+                if (data.is_valid && data.data) {
+                    displayVerificationData(data.data);
+                } else {
+                    verificationResult.innerHTML = '';
+                }
+            })
+            .catch(error => {
+                scanStatus.innerHTML = `<div class="error">Error verifying QR: ${error.message}</div>`;
+                verificationResult.innerHTML = '';
+            });
+        }
+        
+        // Display the verification data
+        function displayVerificationData(data) {
+            let html = '<div class="verification-data">';
+            
+            // Aadhaar section
+            html += '<h3>Aadhaar Information</h3>';
+            html += '<table>';
+            html += `<tr><td><strong>Name:</strong></td><td>${data.aadhaar.fullname}</td></tr>`;
+            html += `<tr><td><strong>DOB:</strong></td><td>${data.aadhaar.dob}</td></tr>`;
+            html += `<tr><td><strong>Gender:</strong></td><td>${data.aadhaar.gender}</td></tr>`;
+            html += `<tr><td><strong>Address:</strong></td><td>${data.aadhaar.address || 'Not available'}</td></tr>`;
+            html += '</table>';
+            
+            // Grade card section with visual representation
+            html += '<h3>Grade Card Elements</h3>';
+            html += '<div class="document-view">';
+            data.gradecard.forEach(item => {
+                const [x, y, width, height, text] = item;
+                html += `<div class="document-element" style="left: ${x}px; top: ${y}px; width: ${width}px; height: ${height}px;">${text}</div>`;
+            });
+            html += '</div>';
+            
+            // Additional info
+            if (data.remarks) {
+                html += '<h3>Remarks</h3>';
+                html += `<p>${data.remarks}</p>`;
+            }
+            
+            if (data.enrollment) {
+                html += '<h3>Enrollment Number</h3>';
+                html += `<p>${data.enrollment}</p>`;
+            }
+            
+            html += '</div>';
+            
+            verificationResult.innerHTML = html;
+        }
+    </script>
+</body>
+</html>
